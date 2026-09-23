@@ -451,7 +451,12 @@ void lvgl_log(const char *buf)
 
 void setup()
 {
-  // Disable brownout
+  // Brownout is disabled only for the duration of setup(): PSRAM/SPI/display init can cause
+  // transient voltage dips that trip a false brownout reset on some boards. Leaving it disabled
+  // for the entire runtime (as before) removes real protection against genuine undervoltage
+  // (e.g. a marginal USB supply combined with a Wi-Fi TX current spike), which can hang the CPU
+  // instead of resetting it cleanly - restored at the end of setup(), see below.
+  const uint32_t brown_out_reg_default = READ_PERI_REG(RTC_CNTL_BROWN_OUT_REG);
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
 #ifdef GPIO_ADC_EN
@@ -575,6 +580,10 @@ void setup()
   {
     log_e("Timezone %s not found!", iotWebParamTimeZone.value());
   }
+
+  // Re-arm brownout protection now that boot-time init is done, so a real undervoltage
+  // event during the days/weeks of runtime that follow causes a clean reset instead of a hang.
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, brown_out_reg_default);
 }
 
 void display_clock()
@@ -654,7 +663,14 @@ void display_flight(std::list<flight_info>::const_iterator it)
 {
   const flight_info &flight_info = *it;
 
+  // flight_info::toString() concatenates ~10 Strings (several heap allocations) on every
+  // single call. log_i() itself is already compiled out below CORE_DEBUG_LEVEL=INFO, but its
+  // arguments are evaluated unconditionally in C/C++, so without this guard toString() still
+  // runs (and still fragments the heap) even when nothing is printed. This mirrors the same
+  // compile-time gate log_i() uses, so the allocation only happens when it will actually be logged.
+#if CORE_DEBUG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
   log_i("%s", flight_info.toString().c_str());
+#endif
   lv_obj_clean(lv_scr_act());
 
   const auto aircraft = flight_info.aircraft_type();
@@ -1051,6 +1067,37 @@ void loop()
     else
       display_flights();
     break;
+  }
+
+  // Heap diagnostics + defensive restart. See settings.h for the thresholds/cadence and the
+  // "hang after a couple of days" investigation for why this was added.
+  {
+    static unsigned long next_heap_check = 0;
+    static unsigned long boot_time = millis();
+    const auto now = millis();
+
+    if (static_cast<long>(now - next_heap_check) > 0)
+    {
+      next_heap_check = now + heap_check_milliseconds;
+      const auto free_heap = ESP.getFreeHeap();
+      const auto min_free_heap = ESP.getMinFreeHeap();
+      log_i("Heap check - free: %u bytes, historical min: %u bytes", free_heap, min_free_heap);
+
+      if (free_heap < heap_minimum_free_bytes)
+      {
+        log_e("Free heap (%u bytes) below safety threshold (%u bytes); restarting", free_heap, heap_minimum_free_bytes);
+        delay(100); // let the log line above flush before resetting
+        ESP.restart();
+      }
+    }
+
+    // Signed subtraction: safe across the millis() wrap-around, same pattern as next_update above.
+    if (static_cast<long>(now - boot_time - uptime_reboot_milliseconds) > 0)
+    {
+      log_i("Scheduled preventive restart after %lu ms uptime", uptime_reboot_milliseconds);
+      delay(100);
+      ESP.restart();
+    }
   }
 
   yield();
