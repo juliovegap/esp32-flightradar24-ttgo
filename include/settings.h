@@ -94,6 +94,18 @@ constexpr auto flight_milliseconds_noflights = 30 * 1000ul;
 // Allow 4 cycles of each flight
 constexpr auto display_cycles = 4;
 
+// Heap diagnostics: log free heap periodically so fragmentation trends are visible in the logs
+// instead of only showing up as an unexplained crash/hang after days of uptime.
+constexpr auto heap_check_milliseconds = 5 * 60 * 1000ul; // every 5 minutes
+// Safety net: Strings used throughout flight parsing/display can fragment the heap over long
+// uptimes (see get_flights()/flight_info). Below this threshold of free internal heap, prefer a
+// clean, controlled restart over risking an allocation failure or corruption-induced hang.
+constexpr auto heap_minimum_free_bytes = 20 * 1024ul;
+// Belt-and-suspenders: restart on a fixed cadence regardless of heap, during a moment the user is
+// unlikely to be watching, so any slow leak/fragmentation/CDC-logging issue never accumulates for
+// more than this long between recoveries.
+constexpr auto uptime_reboot_milliseconds = 48ul * 60 * 60 * 1000ul; // 48 hours
+
 // Backlight dimming: the backlight LED (TFT_BL) is driven with PWM so the brightness can be changed
 constexpr auto backlight_pwm_frequency = 5000;                            // PWM frequency in Hz (outside the audible range)
 constexpr auto backlight_pwm_resolution = 8;                              // PWM resolution in bits (duty cycle 0..255)
